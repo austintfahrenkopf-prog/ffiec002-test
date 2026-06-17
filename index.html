@@ -55,7 +55,13 @@ async function init(){
   const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
   await db.instantiate(b.mainModule, b.pthreadWorker);
   conn = await db.connect();
-  for(const p of PARTS){ await db.registerFileURL(p, new URL(p, location.href).href, 4, false); }
+  for(const p of PARTS){
+    status('Downloading data file '+p+' …');
+    const resp = await fetch(new URL(p, location.href).href);
+    if(!resp.ok) throw new Error('data file '+p+' HTTP '+resp.status+' (is it uploaded to the repo root?)');
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    await db.registerFileBuffer(p, buf);
+  }
   const src = PARTS.map(p=>`'${p}'`).join(',');
   await conn.query(`CREATE VIEW t AS SELECT * FROM read_parquet([${src}])`);
   status('Loading filer list…');
@@ -78,7 +84,7 @@ async function init(){
   document.getElementById('downloads').innerHTML='&#11015; Full dataset: '+PARTS.map(p=>`<a href="${p}" download>${p}</a>`).join(' &middot; ')+' &nbsp;<span>(open in Python / Power BI / DuckDB; use the SQL box below to export filtered slices as CSV)</span>';
   status(`Ready — ${PARTS.length} data file(s) loaded. Pick a filer and a line item.`);
   showSeries();
- }catch(e){ status('Engine/data failed to load: '+e+'  (if at work, the DuckDB CDN may be blocked — tell Claude to bundle it).'); }
+ }catch(e){ status('Load failed: '+e+'  — "HTTP 404" means the parquet isn\'t uploaded at the repo root; a module/worker/network error means the DuckDB CDN is blocked (tell Claude to bundle it).'); }
 }
 async function loadMdrm(){
  const id=document.getElementById('filer').value;
