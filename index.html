@@ -33,6 +33,12 @@
  </div>
  <div id="chart"></div>
  <div id="table"></div>
+ <div class="row" style="margin-top:22px;border-top:1px solid #e3e8ef;padding-top:14px">
+   <div><label>Rank ALL banks for the selected line item, in quarter</label><select id="rankq"></select></div>
+   <div><button id="rankbtn" class="sec">Rank banks &#9656;</button></div>
+   <div><label style="font-size:12px"><input type="checkbox" id="rankmat" checked> for NPL %, exclude banks with loans &lt; $1B</label></div>
+ </div>
+ <div id="rankout"></div>
  <details><summary><b>SQL (power users)</b> — table name is <code>t</code></summary>
    <p class="muted">Columns: quarter_end, id_rssd, institution_name, entity_type, mdrm, description, value, source</p>
    <textarea id="sql">SELECT quarter_end, value FROM t WHERE id_rssd=450810 AND mdrm='RCFD2170' ORDER BY quarter_end;</textarea>
@@ -48,9 +54,13 @@ const status = m => document.getElementById('status').textContent = m;
 let conn, lastRows=[], lastCols=[], sqlCols=[], sqlRows=[], filerMap=new Map(), mdrmMap=new Map();
 function filerId(){ const v=document.getElementById('filer').value.trim();
   if(filerMap.has(v)) return filerMap.get(v);
+  const et=v.match(/\b(UFB|USB|UFA|USA|IFB|ISB)\b/i); if(et) return 'ET:'+et[1].toUpperCase();
   if(/^all/i.test(v)) return 'ALL';
   const m=v.match(/(\d{3,})/); if(m && [...filerMap.values()].includes(m[1])) return m[1];
   return null; }
+function scope(id){ if(id==='ALL') return {agg:true,cond:''};
+  if(id&&id.startsWith('ET:')) return {agg:true,cond:`entity_type='${id.slice(3)}'`};
+  return {agg:false,cond:`id_rssd=${id}`}; }
 function mdrmCode(){ const v=document.getElementById('mdrm').value.trim();
   if(mdrmMap.has(v)) return mdrmMap.get(v);
   const m=v.match(/^([A-Za-z]{4}[A-Za-z0-9]{4})/); return m?m[1].toUpperCase():null; }
@@ -78,6 +88,11 @@ async function init(){
   const fs = document.getElementById('filer'); const dl=document.getElementById('filerlist');
   const ALLLBL='★ ALL BANKS — consolidated sum (all filers)';
   filerMap.set(ALLLBL,'ALL'); { const o=document.createElement('option'); o.value=ALLLBL; dl.appendChild(o); }
+  const TYPES=[['UFB','uninsured federal branches'],['USB','uninsured state branches'],
+               ['UFA','uninsured federal agencies'],['USA','uninsured state agencies'],
+               ['IFB','insured federal branches'],['ISB','insured state branches']];
+  for(const [t,desc] of TYPES){ const lbl=`★ ALL ${t} — ${desc} (sum)`;
+     filerMap.set(lbl,'ET:'+t); const o=document.createElement('option'); o.value=lbl; dl.appendChild(o); }
   let tdLbl='';
   for(const r of f){ const lbl=`${r.nm} (${r.id_rssd}${r.et?', '+r.et:''})`;
      filerMap.set(lbl, String(r.id_rssd));
@@ -92,6 +107,10 @@ async function init(){
   document.getElementById('csv').onclick=exportCsv;
   document.getElementById('runsql').onclick=runSql;
   document.getElementById('sqlcsv').onclick=exportSql;
+  { const rq=document.getElementById('rankq');
+    const qq=await conn.query(`SELECT DISTINCT quarter_end FROM t ORDER BY quarter_end DESC`);
+    for(const x of qq.toArray()){ const o=document.createElement('option'); o.value=x.quarter_end; o.textContent=x.quarter_end; rq.appendChild(o); }
+    document.getElementById('rankbtn').onclick=rankBanks; }
   document.getElementById('downloads').innerHTML='&#11015; Full dataset: '+PARTS.map(p=>`<a href="${p}" download>${p}</a>`).join(' &middot; ')+' &nbsp;<span>(open in Python / Power BI / DuckDB; use the SQL box below to export filtered slices as CSV)</span>';
   status(`Ready — ${PARTS.length} data file(s) loaded. Pick a filer and a line item.`);
   showSeries();
@@ -99,7 +118,7 @@ async function init(){
 }
 async function loadMdrm(){
  const id=filerId(); if(!id) return;
- const where = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
+ const sc=scope(id); const where = sc.cond?`WHERE ${sc.cond}`:'';
  const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t ${where} GROUP BY mdrm ORDER BY mdrm`);
  const dl=document.getElementById('mdrmlist'); dl.innerHTML=''; mdrmMap.clear();
  const DER=[['__NPL__','Derived: Non-performing loans (RCFD 1403 + 1406 + 1407)'],
@@ -115,7 +134,7 @@ async function showSeries(){
  try{
   const id=filerId(), m=mdrmCode();
   if(!id||!m){ status('Type or pick a filer and a line item.'); return; }
-  const idw = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
+  const sc=scope(id); const idw = sc.cond?`WHERE ${sc.cond}`:'';
   const NPL = `SUM(CASE WHEN mdrm IN ('RCFD1403','RCFD1406','RCFD1407') THEN value END)`;
   const DEN = `SUM(CASE WHEN mdrm='RCFD2122' THEN value END)`;
   let q, unit='$ thousands';
@@ -126,8 +145,9 @@ async function showSeries(){
     unit='%';
     q=`SELECT quarter_end, 100.0*COALESCE(${NPL},0)/NULLIF(${DEN},0) AS value, 'derived' AS source
         FROM t ${idw} GROUP BY quarter_end HAVING ${DEN} > 0 ORDER BY quarter_end`;
-  } else if(id==='ALL'){
-    q=`SELECT quarter_end, SUM(value) AS value, 'ALL_BANKS_SUM' AS source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`;
+  } else if(sc.agg){
+    const w = sc.cond ? `WHERE ${sc.cond} AND mdrm='${m}'` : `WHERE mdrm='${m}'`;
+    q=`SELECT quarter_end, SUM(value) AS value, 'AGG_SUM' AS source FROM t ${w} GROUP BY quarter_end ORDER BY quarter_end`;
   } else {
     q=`SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
   }
@@ -138,7 +158,7 @@ async function showSeries(){
     document.getElementById('chart').innerHTML='<p class=muted>No data.</p>'; document.getElementById('table').innerHTML=''; return; }
   drawChart(lastRows, unit); drawTable(lastCols,lastRows, unit);
   document.getElementById('csv').disabled=false;
-  const who = id==='ALL'?'ALL BANKS (consolidated)':id;
+  const who = id==='ALL'?'ALL BANKS (consolidated)':(id.startsWith('ET:')?'ALL '+id.slice(3)+' (sum)':id);
   const lbl = m==='__NPL__'?'Non-performing loans':(m==='__NPLPCT__'?'NPL %':m);
   status(`Showing ${lbl} for ${who} — ${lastRows.length} quarters (${unit}).`);
  }catch(e){ status('Chart error: '+e); console.error(e); }
@@ -180,6 +200,41 @@ function exportCsv(){
  const blob=new Blob([lines.join('\n')],{type:'text/csv'});
  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
  a.download='ffiec002_series.csv'; a.click();
+}
+async function rankBanks(){
+ try{
+  const m=mdrmCode(); const q=document.getElementById('rankq').value;
+  const out=document.getElementById('rankout');
+  if(!m||!q){ out.innerHTML='<p class=muted>Pick a line item and a quarter.</p>'; return; }
+  const NPL=`SUM(CASE WHEN mdrm IN ('RCFD1403','RCFD1406','RCFD1407') THEN value END)`;
+  const DEN=`SUM(CASE WHEN mdrm='RCFD2122' THEN value END)`;
+  let sql, cols, title;
+  if(m==='__NPL__'){
+    sql=`SELECT id_rssd, any_value(institution_name) AS name, ${NPL} AS npl_thousands
+         FROM t WHERE quarter_end='${q}' GROUP BY id_rssd HAVING ${NPL} IS NOT NULL
+         ORDER BY npl_thousands DESC LIMIT 25`;
+    cols=['id_rssd','name','npl_thousands']; title='Top non-performing loan balances';
+  } else if(m==='__NPLPCT__'){
+    const mat=document.getElementById('rankmat').checked?`AND ${DEN}>1000000`:'';
+    sql=`SELECT id_rssd, any_value(institution_name) AS name,
+           100.0*COALESCE(${NPL},0)/NULLIF(${DEN},0) AS npl_pct,
+           ${NPL} AS npl_thousands, ${DEN} AS loans_thousands
+         FROM t WHERE quarter_end='${q}' GROUP BY id_rssd
+         HAVING ${DEN}>0 ${mat} ORDER BY npl_pct DESC LIMIT 25`;
+    cols=['id_rssd','name','npl_pct','npl_thousands','loans_thousands']; title='Highest NPL %';
+  } else {
+    sql=`SELECT id_rssd, institution_name AS name, value FROM t
+         WHERE mdrm='${m}' AND quarter_end='${q}' ORDER BY value DESC LIMIT 25`;
+    cols=['id_rssd','name','value']; title='Largest '+m;
+  }
+  const rows=(await conn.query(sql)).toArray();
+  let h=`<p class=muted>${title} — ${q} (top ${rows.length})</p><table><tr><th>#</th>`+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
+  rows.forEach((x,i)=>{ h+=`<tr><td>${i+1}</td>`+cols.map(c=>{ let v=x[c];
+     if(c==='npl_pct') v=Number(v).toFixed(2)+'%';
+     else if(c==='value'||c.endsWith('thousands')) v=Number(v).toLocaleString();
+     return `<td>${v==null?'':v}</td>`; }).join('')+'</tr>'; });
+  out.innerHTML=h+'</table>';
+ }catch(e){ document.getElementById('rankout').textContent='Rank error: '+e; console.error(e); }
 }
 async function runSql(){
  try{ const r=await conn.query(document.getElementById('sql').value);
