@@ -1,38 +1,123 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FFIEC 002 — reachability test</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FFIEC 002 Explorer — U.S. Branches & Agencies of Foreign Banks</title>
 <style>
-  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-         max-width: 720px; margin: 6vh auto; padding: 0 20px; color: #14213d; }
-  .ok { color: #1b7f3b; font-weight: 700; }
-  .card { border: 1px solid #d8dee9; border-radius: 12px; padding: 24px; }
-  code { background:#f2f4f8; padding:2px 6px; border-radius:6px; }
-  button { font-size:16px; padding:10px 16px; border-radius:8px; border:1px solid #1b7f3b;
-           background:#1b7f3b; color:#fff; cursor:pointer; }
-  #stamp { font-size: 14px; color:#5a6478; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>✅ <span class="ok">It loaded.</span></h1>
-    <p>If you can read this from your <b>work computer</b>, then a site published
-       from your personal PC is reachable through your corporate network.</p>
-    <p id="stamp"></p>
-    <p><button onclick="document.getElementById('out').textContent =
-        'Button works — JavaScript is allowed here too. ' + new Date().toLocaleString();">
-        Test JavaScript</button></p>
-    <p id="out"></p>
-    <hr>
-    <p style="font-size:14px;color:#5a6478">This is a static reachability test.
-       The real data explorer would load the FFIEC 002 parquet here.</p>
-  </div>
-<script>
-  document.getElementById('stamp').textContent =
-    'Page rendered at ' + new Date().toLocaleString() +
-    '  ·  host: ' + location.host;
-</script>
-</body>
-</html>
+ body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;color:#14213d;background:#fafbfc}
+ header{background:#14213d;color:#fff;padding:14px 22px}
+ header h1{margin:0;font-size:18px} header p{margin:4px 0 0;font-size:13px;color:#aeb7c9}
+ .wrap{max-width:1100px;margin:18px auto;padding:0 18px}
+ .row{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin-bottom:14px}
+ label{font-size:12px;color:#5a6478;display:block;margin-bottom:3px}
+ select,input{font-size:14px;padding:7px;border:1px solid #cdd5e0;border-radius:7px;min-width:240px;background:#fff}
+ button{font-size:14px;padding:8px 14px;border:1px solid #1b7f3b;background:#1b7f3b;color:#fff;border-radius:7px;cursor:pointer}
+ button.sec{background:#fff;color:#14213d;border-color:#cdd5e0}
+ #status{font-size:13px;color:#5a6478;margin:8px 0}
+ table{border-collapse:collapse;width:100%;font-size:13px;margin-top:10px}
+ th,td{border:1px solid #e3e8ef;padding:6px 9px;text-align:right} th{background:#f2f5f9}
+ td:first-child,th:first-child{text-align:left}
+ svg{background:#fff;border:1px solid #e3e8ef;border-radius:8px}
+ details{margin-top:22px;background:#fff;border:1px solid #e3e8ef;border-radius:8px;padding:12px}
+ textarea{width:100%;height:90px;font-family:Consolas,monospace;font-size:13px;border:1px solid #cdd5e0;border-radius:7px;padding:8px}
+ .muted{color:#5a6478;font-size:12px}
+</style></head><body>
+<header><h1>FFIEC 002 Explorer</h1>
+<p>Report of Assets &amp; Liabilities of U.S. Branches and Agencies of Foreign Banks · 1999&ndash;present · all filers</p></header>
+<div class="wrap">
+ <div id="status">Loading data engine…</div>
+ <div class="row">
+   <div><label>Filer</label><select id="filer" disabled></select></div>
+   <div><label>Line item (MDRM)</label><select id="mdrm" disabled></select></div>
+   <div><button id="go" disabled>Show series</button></div>
+   <div><button id="csv" class="sec" disabled>Export CSV</button></div>
+ </div>
+ <div id="chart"></div>
+ <div id="table"></div>
+ <details><summary><b>SQL (power users)</b> — table name is <code>t</code></summary>
+   <p class="muted">Columns: quarter_end, id_rssd, institution_name, entity_type, mdrm, description, value, source</p>
+   <textarea id="sql">SELECT quarter_end, value FROM t WHERE id_rssd=450810 AND mdrm='RCFD2170' ORDER BY quarter_end;</textarea>
+   <div style="margin-top:8px"><button id="runsql" class="sec">Run SQL</button></div>
+   <div id="sqlout"></div>
+ </details>
+</div>
+<script type="module">
+import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+const PARTS = ['ffiec002.parquet'];
+const status = m => document.getElementById('status').textContent = m;
+let conn, lastRows=[], lastCols=[];
+
+async function init(){
+ try{
+  const B = duckdb.getJsDelivrBundles();
+  const b = await duckdb.selectBundle(B);
+  const worker = await duckdb.createWorker(b.mainWorker);
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+  await db.instantiate(b.mainModule, b.pthreadWorker);
+  conn = await db.connect();
+  for(const p of PARTS){ await db.registerFileURL(p, new URL(p, location.href).href, 4, false); }
+  const src = PARTS.map(p=>`'${p}'`).join(',');
+  await conn.query(`CREATE VIEW t AS SELECT * FROM read_parquet([${src}])`);
+  status('Loading filer list…');
+  const f = await conn.query(`SELECT id_rssd, any_value(institution_name) nm, any_value(entity_type) et
+                              FROM t GROUP BY id_rssd ORDER BY nm`);
+  const fs = document.getElementById('filer');
+  for(const r of f){ const o=document.createElement('option'); o.value=r.id_rssd;
+     o.textContent=`${r.nm} (${r.id_rssd}${r.et?', '+r.et:''})`; fs.appendChild(o); }
+  fs.disabled=false; document.getElementById('go').disabled=false;
+  if([...fs.options].some(o=>o.value==='450810')) fs.value='450810';
+  await loadMdrm();
+  fs.onchange=loadMdrm;
+  document.getElementById('go').onclick=showSeries;
+  document.getElementById('csv').onclick=exportCsv;
+  document.getElementById('runsql').onclick=runSql;
+  status(`Ready — ${PARTS.length} data file(s) loaded. Pick a filer and a line item.`);
+  showSeries();
+ }catch(e){ status('Engine/data failed to load: '+e+'  (if at work, the DuckDB CDN may be blocked — tell Claude to bundle it).'); }
+}
+async function loadMdrm(){
+ const id=document.getElementById('filer').value;
+ const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t WHERE id_rssd=${id} GROUP BY mdrm ORDER BY mdrm`);
+ const ms=document.getElementById('mdrm'); ms.innerHTML='';
+ for(const x of r){ const o=document.createElement('option'); o.value=x.mdrm;
+    o.textContent=x.d?`${x.mdrm} — ${x.d}`:x.mdrm; ms.appendChild(o); }
+ ms.disabled=false;
+ const want=[...ms.options].find(o=>o.value==='RCFD2170'); if(want) ms.value='RCFD2170';
+}
+async function showSeries(){
+ const id=document.getElementById('filer').value, m=document.getElementById('mdrm').value;
+ if(!m) return;
+ const r=await conn.query(`SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`);
+ lastCols=['quarter_end','value','source']; lastRows=r.toArray().map(x=>[x.quarter_end,Number(x.value),x.source]);
+ drawChart(lastRows); drawTable(lastCols,lastRows);
+ document.getElementById('csv').disabled=lastRows.length===0;
+}
+function drawChart(rows){
+ const W=1040,H=300,pad=54; const xs=rows.map(r=>r[0]),ys=rows.map(r=>r[1]);
+ const c=document.getElementById('chart'); if(!rows.length){c.innerHTML='<p class=muted>No data.</p>';return;}
+ const mn=Math.min(...ys),mx=Math.max(...ys),rng=(mx-mn)||1;
+ const X=i=>pad+i*(W-2*pad)/Math.max(1,rows.length-1), Y=v=>H-pad-(v-mn)/rng*(H-2*pad);
+ let p=''; rows.forEach((r,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(r[1]).toFixed(1)+' ';});
+ const ticks=[mn,mn+rng/2,mx].map(v=>`<text x=6 y=${Y(v)+4} font-size=11 fill=#5a6478>${(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})}k</text><line x1=${pad} y1=${Y(v)} x2=${W-pad} y2=${Y(v)} stroke=#eef2f7/>`).join('');
+ const lbl=[0,Math.floor(rows.length/2),rows.length-1].map(i=>`<text x=${X(i)} y=${H-pad+18} font-size=11 fill=#5a6478 text-anchor=middle>${xs[i]}</text>`).join('');
+ c.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%">${ticks}<path d="${p}" fill=none stroke=#1b7f3b stroke-width=2/>${lbl}<text x=${W/2} y=18 font-size=12 fill=#14213d text-anchor=middle>value in $thousands</text></svg>`;
+}
+function drawTable(cols,rows){
+ let h='<table><tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
+ for(const r of rows){h+='<tr>'+r.map((v,i)=>`<td>${i===1?Number(v).toLocaleString():v}</td>`).join('')+'</tr>';}
+ document.getElementById('table').innerHTML=h+'</table>';
+}
+function exportCsv(){
+ const lines=[lastCols.join(',')].concat(lastRows.map(r=>r.join(',')));
+ const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+ const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+ a.download='ffiec002_series.csv'; a.click();
+}
+async function runSql(){
+ try{ const r=await conn.query(document.getElementById('sql').value);
+   const rows=r.toArray(); const cols=rows.length?Object.keys(rows[0]):[];
+   let h='<table><tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
+   for(const x of rows.slice(0,500)){h+='<tr>'+cols.map(c=>`<td>${x[c]}</td>`).join('')+'</tr>';}
+   document.getElementById('sqlout').innerHTML=h+`</table><p class=muted>${rows.length} rows (first 500 shown)</p>`;
+ }catch(e){ document.getElementById('sqlout').textContent='SQL error: '+e; }
+}
+init();
+</script></body></html>
