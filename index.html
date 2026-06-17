@@ -24,6 +24,7 @@
 <p>Report of Assets &amp; Liabilities of U.S. Branches and Agencies of Foreign Banks · 1999&ndash;present · all filers</p></header>
 <div class="wrap">
  <div id="status">Loading data engine…</div>
+ <div id="downloads" class="muted" style="margin-bottom:10px"></div>
  <div class="row">
    <div><label>Filer</label><select id="filer" disabled></select></div>
    <div><label>Line item (MDRM)</label><select id="mdrm" disabled></select></div>
@@ -35,7 +36,8 @@
  <details><summary><b>SQL (power users)</b> — table name is <code>t</code></summary>
    <p class="muted">Columns: quarter_end, id_rssd, institution_name, entity_type, mdrm, description, value, source</p>
    <textarea id="sql">SELECT quarter_end, value FROM t WHERE id_rssd=450810 AND mdrm='RCFD2170' ORDER BY quarter_end;</textarea>
-   <div style="margin-top:8px"><button id="runsql" class="sec">Run SQL</button></div>
+   <div style="margin-top:8px"><button id="runsql" class="sec">Run SQL</button>
+     <button id="sqlcsv" class="sec">Export result CSV</button></div>
    <div id="sqlout"></div>
  </details>
 </div>
@@ -43,7 +45,7 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 const PARTS = ['ffiec002.parquet'];
 const status = m => document.getElementById('status').textContent = m;
-let conn, lastRows=[], lastCols=[];
+let conn, lastRows=[], lastCols=[], sqlCols=[], sqlRows=[];
 
 async function init(){
  try{
@@ -62,6 +64,9 @@ async function init(){
   const fs = document.getElementById('filer');
   for(const r of f){ const o=document.createElement('option'); o.value=r.id_rssd;
      o.textContent=`${r.nm} (${r.id_rssd}${r.et?', '+r.et:''})`; fs.appendChild(o); }
+  const allo=document.createElement('option'); allo.value='ALL';
+  allo.textContent='★ ALL BANKS — consolidated sum (all filers)';
+  fs.insertBefore(allo, fs.firstChild);
   fs.disabled=false; document.getElementById('go').disabled=false;
   if([...fs.options].some(o=>o.value==='450810')) fs.value='450810';
   await loadMdrm();
@@ -69,13 +74,16 @@ async function init(){
   document.getElementById('go').onclick=showSeries;
   document.getElementById('csv').onclick=exportCsv;
   document.getElementById('runsql').onclick=runSql;
+  document.getElementById('sqlcsv').onclick=exportSql;
+  document.getElementById('downloads').innerHTML='&#11015; Full dataset: '+PARTS.map(p=>`<a href="${p}" download>${p}</a>`).join(' &middot; ')+' &nbsp;<span>(open in Python / Power BI / DuckDB; use the SQL box below to export filtered slices as CSV)</span>';
   status(`Ready — ${PARTS.length} data file(s) loaded. Pick a filer and a line item.`);
   showSeries();
  }catch(e){ status('Engine/data failed to load: '+e+'  (if at work, the DuckDB CDN may be blocked — tell Claude to bundle it).'); }
 }
 async function loadMdrm(){
  const id=document.getElementById('filer').value;
- const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t WHERE id_rssd=${id} GROUP BY mdrm ORDER BY mdrm`);
+ const where = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
+ const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t ${where} GROUP BY mdrm ORDER BY mdrm`);
  const ms=document.getElementById('mdrm'); ms.innerHTML='';
  for(const x of r){ const o=document.createElement('option'); o.value=x.mdrm;
     o.textContent=x.d?`${x.mdrm} — ${x.d}`:x.mdrm; ms.appendChild(o); }
@@ -85,20 +93,36 @@ async function loadMdrm(){
 async function showSeries(){
  const id=document.getElementById('filer').value, m=document.getElementById('mdrm').value;
  if(!m) return;
- const r=await conn.query(`SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`);
+ const q = id==='ALL'
+   ? `SELECT quarter_end, SUM(value) value, 'ALL_BANKS_SUM' source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`
+   : `SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
+ const r=await conn.query(q);
  lastCols=['quarter_end','value','source']; lastRows=r.toArray().map(x=>[x.quarter_end,Number(x.value),x.source]);
  drawChart(lastRows); drawTable(lastCols,lastRows);
  document.getElementById('csv').disabled=lastRows.length===0;
 }
 function drawChart(rows){
- const W=1040,H=300,pad=54; const xs=rows.map(r=>r[0]),ys=rows.map(r=>r[1]);
+ const W=1040,H=320,pad=56; const xs=rows.map(r=>r[0]),ys=rows.map(r=>r[1]);
  const c=document.getElementById('chart'); if(!rows.length){c.innerHTML='<p class=muted>No data.</p>';return;}
- const mn=Math.min(...ys),mx=Math.max(...ys),rng=(mx-mn)||1;
- const X=i=>pad+i*(W-2*pad)/Math.max(1,rows.length-1), Y=v=>H-pad-(v-mn)/rng*(H-2*pad);
+ const n=rows.length;
+ // linear regression (least squares) for the trend line
+ let sx=0,sy=0,sxx=0,sxy=0;
+ rows.forEach((r,i)=>{sx+=i;sy+=r[1];sxx+=i*i;sxy+=i*r[1];});
+ const slope=(n*sxy-sx*sy)/((n*sxx-sx*sx)||1), icpt=(sy-slope*sx)/n;
+ const t0=icpt, t1=icpt+slope*(n-1);
+ const mn=Math.min(...ys,t0,t1),mx=Math.max(...ys,t0,t1),rng=(mx-mn)||1;
+ const X=i=>pad+i*(W-2*pad)/Math.max(1,n-1), Y=v=>H-pad-(v-mn)/rng*(H-2*pad);
  let p=''; rows.forEach((r,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(r[1]).toFixed(1)+' ';});
- const ticks=[mn,mn+rng/2,mx].map(v=>`<text x=6 y=${Y(v)+4} font-size=11 fill=#5a6478>${(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})}k</text><line x1=${pad} y1=${Y(v)} x2=${W-pad} y2=${Y(v)} stroke=#eef2f7/>`).join('');
- const lbl=[0,Math.floor(rows.length/2),rows.length-1].map(i=>`<text x=${X(i)} y=${H-pad+18} font-size=11 fill=#5a6478 text-anchor=middle>${xs[i]}</text>`).join('');
- c.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%">${ticks}<path d="${p}" fill=none stroke=#1b7f3b stroke-width=2/>${lbl}<text x=${W/2} y=18 font-size=12 fill=#14213d text-anchor=middle>value in $thousands</text></svg>`;
+ const trend=`M ${X(0).toFixed(1)} ${Y(t0).toFixed(1)} L ${X(n-1).toFixed(1)} ${Y(t1).toFixed(1)}`;
+ const ticks=[mn,(mn+mx)/2,mx].map(v=>`<text x=6 y=${Y(v)+4} font-size=11 fill=#5a6478>${(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})}k</text><line x1=${pad} y1=${Y(v)} x2=${W-pad} y2=${Y(v)} stroke=#eef2f7/>`).join('');
+ const lbl=[0,Math.floor(n/2),n-1].map(i=>`<text x=${X(i)} y=${H-pad+18} font-size=11 fill=#5a6478 text-anchor=middle>${xs[i]}</text>`).join('');
+ const dir = slope>0?'rising':(slope<0?'falling':'flat');
+ const legend=`<rect x=${W-230} y=26 width=14 height=3 fill=#1b7f3b/><text x=${W-210} y=31 font-size=11 fill=#14213d>actual</text>`+
+              `<rect x=${W-150} y=26 width=14 height=3 fill=#e07a1f/><text x=${W-130} y=31 font-size=11 fill=#14213d>trend (${dir})</text>`;
+ c.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%">${ticks}`+
+   `<path d="${trend}" fill=none stroke=#e07a1f stroke-width=2 stroke-dasharray="6 5"/>`+
+   `<path d="${p}" fill=none stroke=#1b7f3b stroke-width=2/>${lbl}${legend}`+
+   `<text x=${W/2} y=18 font-size=12 fill=#14213d text-anchor=middle>value in $thousands</text></svg>`;
 }
 function drawTable(cols,rows){
  let h='<table><tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
@@ -114,10 +138,19 @@ function exportCsv(){
 async function runSql(){
  try{ const r=await conn.query(document.getElementById('sql').value);
    const rows=r.toArray(); const cols=rows.length?Object.keys(rows[0]):[];
+   sqlCols=cols; sqlRows=rows;
    let h='<table><tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
    for(const x of rows.slice(0,500)){h+='<tr>'+cols.map(c=>`<td>${x[c]}</td>`).join('')+'</tr>';}
-   document.getElementById('sqlout').innerHTML=h+`</table><p class=muted>${rows.length} rows (first 500 shown)</p>`;
+   document.getElementById('sqlout').innerHTML=h+`</table><p class=muted>${rows.length} rows (first 500 shown; "Export result CSV" downloads all ${rows.length})</p>`;
  }catch(e){ document.getElementById('sqlout').textContent='SQL error: '+e; }
+}
+function exportSql(){
+ if(!sqlRows.length){ alert('Run a query first.'); return; }
+ const esc=v=>{v=(v==null?'':String(v)); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
+ const lines=[sqlCols.join(',')].concat(sqlRows.map(r=>sqlCols.map(c=>esc(r[c])).join(',')));
+ const blob=new Blob([lines.join('\n')],{type:'text/csv'});
+ const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+ a.download='ffiec002_query.csv'; a.click();
 }
 init();
 </script></body></html>
