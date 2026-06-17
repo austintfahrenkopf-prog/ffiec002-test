@@ -109,15 +109,21 @@ async function loadMdrm(){
  const ms=document.getElementById('mdrm'); ms.disabled=false; ms.value = def || first;
 }
 async function showSeries(){
- const id=filerId(), m=mdrmCode();
- if(!id||!m) return;
- const q = id==='ALL'
-   ? `SELECT quarter_end, SUM(value) value, 'ALL_BANKS_SUM' source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`
-   : `SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
- const r=await conn.query(q);
- lastCols=['quarter_end','value','source']; lastRows=r.toArray().map(x=>[x.quarter_end,Number(x.value),x.source]);
- drawChart(lastRows); drawTable(lastCols,lastRows);
- document.getElementById('csv').disabled=lastRows.length===0;
+ try{
+  const id=filerId(), m=mdrmCode();
+  if(!id||!m){ status('Type or pick a filer and a line item.'); return; }
+  const q = id==='ALL'
+    ? `SELECT quarter_end, SUM(value) AS value, 'ALL_BANKS_SUM' AS source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`
+    : `SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
+  const r=await conn.query(q);
+  lastCols=['quarter_end','value','source'];
+  lastRows=r.toArray().map(x=>[String(x.quarter_end), Number(x.value), String(x.source)]);
+  if(!lastRows.length){ status(`No data for ${id==='ALL'?'ALL BANKS':id} / ${m}.`);
+    document.getElementById('chart').innerHTML='<p class=muted>No data.</p>'; document.getElementById('table').innerHTML=''; return; }
+  drawChart(lastRows); drawTable(lastCols,lastRows);
+  document.getElementById('csv').disabled=false;
+  status(`Showing ${m} — ${id==='ALL'?'ALL BANKS (consolidated, '+lastRows.length+' quarters)':id+' ('+lastRows.length+' quarters)'}.`);
+ }catch(e){ status('Chart error: '+e); console.error(e); }
 }
 function drawChart(rows){
  const W=1040,H=320,pad=56; const xs=rows.map(r=>r[0]),ys=rows.map(r=>r[1]);
