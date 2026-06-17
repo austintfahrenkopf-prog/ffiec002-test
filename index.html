@@ -26,8 +26,8 @@
  <div id="status">Loading data engine…</div>
  <div id="downloads" class="muted" style="margin-bottom:10px"></div>
  <div class="row">
-   <div><label>Filer</label><select id="filer" disabled></select></div>
-   <div><label>Line item (MDRM)</label><select id="mdrm" disabled></select></div>
+   <div><label>Filer (type name or RSSD)</label><input id="filer" list="filerlist" placeholder="e.g. Toronto or 450810" autocomplete="off" disabled style="min-width:360px"><datalist id="filerlist"></datalist></div>
+   <div><label>Line item (type MDRM or description)</label><input id="mdrm" list="mdrmlist" placeholder="e.g. RCFD2170 or total assets" autocomplete="off" disabled style="min-width:360px"><datalist id="mdrmlist"></datalist></div>
    <div><button id="go" disabled>Show series</button></div>
    <div><button id="csv" class="sec" disabled>Export CSV</button></div>
  </div>
@@ -45,7 +45,15 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 const PARTS = ['ffiec002.parquet'];
 const status = m => document.getElementById('status').textContent = m;
-let conn, lastRows=[], lastCols=[], sqlCols=[], sqlRows=[];
+let conn, lastRows=[], lastCols=[], sqlCols=[], sqlRows=[], filerMap=new Map(), mdrmMap=new Map();
+function filerId(){ const v=document.getElementById('filer').value.trim();
+  if(filerMap.has(v)) return filerMap.get(v);
+  if(/^all/i.test(v)) return 'ALL';
+  const m=v.match(/(\d{3,})/); if(m && [...filerMap.values()].includes(m[1])) return m[1];
+  return null; }
+function mdrmCode(){ const v=document.getElementById('mdrm').value.trim();
+  if(mdrmMap.has(v)) return mdrmMap.get(v);
+  const m=v.match(/^([A-Za-z]{4}[A-Za-z0-9]{4})/); return m?m[1].toUpperCase():null; }
 
 async function init(){
  try{
@@ -67,17 +75,19 @@ async function init(){
   status('Loading filer list…');
   const f = await conn.query(`SELECT id_rssd, any_value(institution_name) nm, any_value(entity_type) et
                               FROM t GROUP BY id_rssd ORDER BY nm`);
-  const fs = document.getElementById('filer');
-  for(const r of f){ const o=document.createElement('option'); o.value=r.id_rssd;
-     o.textContent=`${r.nm} (${r.id_rssd}${r.et?', '+r.et:''})`; fs.appendChild(o); }
-  const allo=document.createElement('option'); allo.value='ALL';
-  allo.textContent='★ ALL BANKS — consolidated sum (all filers)';
-  fs.insertBefore(allo, fs.firstChild);
+  const fs = document.getElementById('filer'); const dl=document.getElementById('filerlist');
+  const ALLLBL='★ ALL BANKS — consolidated sum (all filers)';
+  filerMap.set(ALLLBL,'ALL'); { const o=document.createElement('option'); o.value=ALLLBL; dl.appendChild(o); }
+  let tdLbl='';
+  for(const r of f){ const lbl=`${r.nm} (${r.id_rssd}${r.et?', '+r.et:''})`;
+     filerMap.set(lbl, String(r.id_rssd));
+     const o=document.createElement('option'); o.value=lbl; dl.appendChild(o);
+     if(String(r.id_rssd)==='450810') tdLbl=lbl; }
   fs.disabled=false; document.getElementById('go').disabled=false;
-  if([...fs.options].some(o=>o.value==='450810')) fs.value='450810';
+  fs.value = tdLbl || ALLLBL;
   await loadMdrm();
-  fs.onchange=async()=>{ await loadMdrm(); await showSeries(); };
-  document.getElementById('mdrm').onchange=showSeries;
+  fs.addEventListener('change', async()=>{ await loadMdrm(); await showSeries(); });
+  document.getElementById('mdrm').addEventListener('change', showSeries);
   document.getElementById('go').onclick=showSeries;
   document.getElementById('csv').onclick=exportCsv;
   document.getElementById('runsql').onclick=runSql;
@@ -88,18 +98,19 @@ async function init(){
  }catch(e){ status('Load failed: '+e+'  — "HTTP 404" means the parquet isn\'t uploaded at the repo root; a module/worker/network error means the DuckDB CDN is blocked (tell Claude to bundle it).'); }
 }
 async function loadMdrm(){
- const id=document.getElementById('filer').value;
+ const id=filerId(); if(!id) return;
  const where = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
  const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t ${where} GROUP BY mdrm ORDER BY mdrm`);
- const ms=document.getElementById('mdrm'); ms.innerHTML='';
- for(const x of r){ const o=document.createElement('option'); o.value=x.mdrm;
-    o.textContent=x.d?`${x.mdrm} — ${x.d}`:x.mdrm; ms.appendChild(o); }
- ms.disabled=false;
- const want=[...ms.options].find(o=>o.value==='RCFD2170'); if(want) ms.value='RCFD2170';
+ const dl=document.getElementById('mdrmlist'); dl.innerHTML=''; mdrmMap.clear();
+ let def='', first='';
+ for(const x of r){ const lbl=x.d?`${x.mdrm} — ${x.d}`:x.mdrm; mdrmMap.set(lbl, x.mdrm);
+    const o=document.createElement('option'); o.value=lbl; dl.appendChild(o);
+    if(!first) first=lbl; if(x.mdrm==='RCFD2170') def=lbl; }
+ const ms=document.getElementById('mdrm'); ms.disabled=false; ms.value = def || first;
 }
 async function showSeries(){
- const id=document.getElementById('filer').value, m=document.getElementById('mdrm').value;
- if(!m) return;
+ const id=filerId(), m=mdrmCode();
+ if(!id||!m) return;
  const q = id==='ALL'
    ? `SELECT quarter_end, SUM(value) value, 'ALL_BANKS_SUM' source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`
    : `SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
