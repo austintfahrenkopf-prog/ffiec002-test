@@ -102,6 +102,9 @@ async function loadMdrm(){
  const where = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
  const r=await conn.query(`SELECT mdrm, any_value(description) d FROM t ${where} GROUP BY mdrm ORDER BY mdrm`);
  const dl=document.getElementById('mdrmlist'); dl.innerHTML=''; mdrmMap.clear();
+ const DER=[['__NPL__','Derived: Non-performing loans (RCFD 1403 + 1406 + 1407)'],
+            ['__NPLPCT__','Derived: NPL % (NPL / RCFD2122)']];
+ for(const [code,lbl] of DER){ mdrmMap.set(lbl,code); const o=document.createElement('option'); o.value=lbl; dl.appendChild(o); }
  let def='', first='';
  for(const x of r){ const lbl=x.d?`${x.mdrm} — ${x.d}`:x.mdrm; mdrmMap.set(lbl, x.mdrm);
     const o=document.createElement('option'); o.value=lbl; dl.appendChild(o);
@@ -112,20 +115,37 @@ async function showSeries(){
  try{
   const id=filerId(), m=mdrmCode();
   if(!id||!m){ status('Type or pick a filer and a line item.'); return; }
-  const q = id==='ALL'
-    ? `SELECT quarter_end, SUM(value) AS value, 'ALL_BANKS_SUM' AS source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`
-    : `SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
+  const idw = id==='ALL' ? '' : `WHERE id_rssd=${id}`;
+  const NPL = `SUM(CASE WHEN mdrm IN ('RCFD1403','RCFD1406','RCFD1407') THEN value END)`;
+  const DEN = `SUM(CASE WHEN mdrm='RCFD2122' THEN value END)`;
+  let q, unit='$ thousands';
+  if(m==='__NPL__'){
+    q=`SELECT quarter_end, ${NPL} AS value, 'derived' AS source FROM t ${idw}
+        GROUP BY quarter_end HAVING ${NPL} IS NOT NULL ORDER BY quarter_end`;
+  } else if(m==='__NPLPCT__'){
+    unit='%';
+    q=`SELECT quarter_end, 100.0*COALESCE(${NPL},0)/NULLIF(${DEN},0) AS value, 'derived' AS source
+        FROM t ${idw} GROUP BY quarter_end HAVING ${DEN} > 0 ORDER BY quarter_end`;
+  } else if(id==='ALL'){
+    q=`SELECT quarter_end, SUM(value) AS value, 'ALL_BANKS_SUM' AS source FROM t WHERE mdrm='${m}' GROUP BY quarter_end ORDER BY quarter_end`;
+  } else {
+    q=`SELECT quarter_end, value, source FROM t WHERE id_rssd=${id} AND mdrm='${m}' ORDER BY quarter_end`;
+  }
   const r=await conn.query(q);
   lastCols=['quarter_end','value','source'];
   lastRows=r.toArray().map(x=>[String(x.quarter_end), Number(x.value), String(x.source)]);
-  if(!lastRows.length){ status(`No data for ${id==='ALL'?'ALL BANKS':id} / ${m}.`);
+  if(!lastRows.length){ status('No data for that selection.');
     document.getElementById('chart').innerHTML='<p class=muted>No data.</p>'; document.getElementById('table').innerHTML=''; return; }
-  drawChart(lastRows); drawTable(lastCols,lastRows);
+  drawChart(lastRows, unit); drawTable(lastCols,lastRows, unit);
   document.getElementById('csv').disabled=false;
-  status(`Showing ${m} — ${id==='ALL'?'ALL BANKS (consolidated, '+lastRows.length+' quarters)':id+' ('+lastRows.length+' quarters)'}.`);
+  const who = id==='ALL'?'ALL BANKS (consolidated)':id;
+  const lbl = m==='__NPL__'?'Non-performing loans':(m==='__NPLPCT__'?'NPL %':m);
+  status(`Showing ${lbl} for ${who} — ${lastRows.length} quarters (${unit}).`);
  }catch(e){ status('Chart error: '+e); console.error(e); }
 }
-function drawChart(rows){
+function drawChart(rows, unit){
+ const pct = unit==='%';
+ const fmt = pct ? (v=>v.toFixed(2)+'%') : (v=>(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})+'k');
  const W=1040,H=320,pad=56; const xs=rows.map(r=>r[0]),ys=rows.map(r=>r[1]);
  const c=document.getElementById('chart'); if(!rows.length){c.innerHTML='<p class=muted>No data.</p>';return;}
  const n=rows.length;
@@ -138,7 +158,7 @@ function drawChart(rows){
  const X=i=>pad+i*(W-2*pad)/Math.max(1,n-1), Y=v=>H-pad-(v-mn)/rng*(H-2*pad);
  let p=''; rows.forEach((r,i)=>{p+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(r[1]).toFixed(1)+' ';});
  const trend=`M ${X(0).toFixed(1)} ${Y(t0).toFixed(1)} L ${X(n-1).toFixed(1)} ${Y(t1).toFixed(1)}`;
- const ticks=[mn,(mn+mx)/2,mx].map(v=>`<line x1="${pad}" y1="${Y(v)}" x2="${W-pad}" y2="${Y(v)}" stroke="#eef2f7"></line><text x="6" y="${Y(v)+4}" font-size="11" fill="#5a6478">${(v/1000).toLocaleString(undefined,{maximumFractionDigits:0})}k</text>`).join('');
+ const ticks=[mn,(mn+mx)/2,mx].map(v=>`<line x1="${pad}" y1="${Y(v)}" x2="${W-pad}" y2="${Y(v)}" stroke="#eef2f7"></line><text x="6" y="${Y(v)+4}" font-size="11" fill="#5a6478">${fmt(v)}</text>`).join('');
  const step=Math.max(1,Math.round((n-1)/8)); const idxs=[]; for(let i=0;i<n;i+=step) idxs.push(i); if(idxs[idxs.length-1]!==n-1) idxs.push(n-1);
  const lbl=idxs.map(i=>`<text x="${X(i)}" y="${H-pad+18}" font-size="10" fill="#5a6478" text-anchor="middle">${xs[i]}</text>`).join('');
  const dir = slope>0?'rising':(slope<0?'falling':'flat');
@@ -147,11 +167,12 @@ function drawChart(rows){
  c.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg">${ticks}`+
    `<path d="${trend}" fill="none" stroke="#e07a1f" stroke-width="2" stroke-dasharray="6 5"></path>`+
    `<path d="${p}" fill="none" stroke="#1b7f3b" stroke-width="2"></path>${lbl}${legend}`+
-   `<text x="${W/2}" y="16" font-size="12" fill="#14213d" text-anchor="middle">value in $thousands</text></svg>`;
+   `<text x="${W/2}" y="16" font-size="12" fill="#14213d" text-anchor="middle">value in ${pct?'percent':'$ thousands'}</text></svg>`;
 }
-function drawTable(cols,rows){
+function drawTable(cols,rows,unit){
+ const pct = unit==='%';
  let h='<table><tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>';
- for(const r of rows){h+='<tr>'+r.map((v,i)=>`<td>${i===1?Number(v).toLocaleString():v}</td>`).join('')+'</tr>';}
+ for(const r of rows){h+='<tr>'+r.map((v,i)=>`<td>${i===1?(pct?Number(v).toFixed(2)+'%':Number(v).toLocaleString()):v}</td>`).join('')+'</tr>';}
  document.getElementById('table').innerHTML=h+'</table>';
 }
 function exportCsv(){
